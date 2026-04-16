@@ -40,8 +40,6 @@ public sealed class DiscordApi : IDisposable
         _whc.Timeout = TimeSpan.FromSeconds(30);
     }
 
-    // ── raw request with auto rate-limit retry ────────────────────────────────
-
     private async Task<JsonNode?> SendAsync(HttpMethod method, string path,
         object? body = null, CancellationToken ct = default)
     {
