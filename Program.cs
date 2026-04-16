@@ -61,7 +61,7 @@ static class Program
         Console.WriteLine();
         Console.WriteLine("  " + Muted("─────────────────────────────────────────────────────────────"));
         Console.WriteLine("  " + Blurple(Bold("Discord Server Cloner")) + "  " +
-                          Muted("v1.0  ·  github.com/user/DiscordServerCloner"));
+                          Muted("v1.0  ·  github.com/DignityDC/DiscordServerCloner"));
         Console.WriteLine("  " + Muted("─────────────────────────────────────────────────────────────"));
         Console.WriteLine();
     }
