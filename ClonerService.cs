@@ -209,6 +209,21 @@ public sealed class ClonerService
                 var chName = ch["name"]?.GetValue<string>() ?? "channel";
                 var chType = ch["type"]?.GetValue<int>() ?? 0;
 
+                if (chType == 14)
+                {
+                    Log($"  Skipped \"{chName}\" (rules/directory channel, community-only)", LogLevel.Warn);
+                    continue;
+                }
+
+                int actualType = chType switch
+                {
+                    5  => 0,
+                    13 => 2,
+                    _  => chType,
+                };
+                if (actualType != chType)
+                    Log($"  \"{chName}\" is {(chType == 5 ? "announcement" : "stage")}, creating as {(actualType == 0 ? "text" : "voice")} instead", LogLevel.Warn);
+
                 if (options.SkipTickets && IsTicketChannel(chName))
                 {
                     Log($"  Skipped ticket channel \"{chName}\"", LogLevel.Warn);
@@ -227,7 +242,7 @@ public sealed class ClonerService
                     var body = new Dictionary<string, object?>
                     {
                         ["name"]                 = chName,
-                        ["type"]                 = chType,
+                        ["type"]                 = actualType,
                         ["position"]             = ch["position"]?.GetValue<int>() ?? 0,
                         ["permission_overwrites"] = overwrites,
                     };
@@ -235,7 +250,7 @@ public sealed class ClonerService
                     if (newParentId is not null)
                         body["parent_id"] = newParentId;
 
-                    if (chType == 0 || chType == 5)
+                    if (actualType == 0)
                     {
                         var topic = ch["topic"]?.GetValue<string>();
                         if (topic is not null) body["topic"] = topic;
@@ -243,15 +258,10 @@ public sealed class ClonerService
                         body["rate_limit_per_user"] = ch["rate_limit_per_user"]?.GetValue<int>() ?? 0;
                     }
 
-                    if (chType == 2)
+                    if (actualType == 2)
                     {
                         body["bitrate"]    = Math.Min(ch["bitrate"]?.GetValue<int>() ?? 64000, 96000);
-                        body["user_limit"] = ch["user_limit"]?.GetValue<int>() ?? 0;
-                    }
-
-                    if (chType == 13)
-                    {
-                        body["bitrate"] = Math.Min(ch["bitrate"]?.GetValue<int>() ?? 64000, 96000);
+                        body["user_limit"] = Math.Min(ch["user_limit"]?.GetValue<int>() ?? 0, 99);
                     }
 
                     var newCh = await _api.CreateChannelAsync(newGuildId, body, ct);
@@ -290,48 +300,30 @@ public sealed class ClonerService
                     continue;
                 }
 
-                bool emojiDone = false;
-                for (int attempt = 1; attempt <= 5 && !emojiDone; attempt++)
+                try
                 {
-                    try
+                    using var emojiCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    emojiCts.CancelAfter(TimeSpan.FromSeconds(3));
+                    await _api.CreateEmojiAsync(newGuildId, new
                     {
-                        using var emojiCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                        emojiCts.CancelAfter(TimeSpan.FromSeconds(20));
-                        await _api.CreateEmojiAsync(newGuildId, new
-                        {
-                            name  = emojiName,
-                            image = dataUri,
-                        }, emojiCts.Token);
-                        Log($"  Emoji \"{emojiName}\" cloned", LogLevel.Success);
-                        emojiDone = true;
-                    }
-                    catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-                    {
-                        Log($"  Emoji \"{emojiName}\" timed out, skipping", LogLevel.Warn);
-                        break;
-                    }
-                    catch (Exception ex)
-                    {
-                        double waitSec = attempt * 3;
-                        var m = System.Text.RegularExpressions.Regex.Match(ex.Message, @"""retry_after""\s*:\s*([\d.]+)");
-                        if (m.Success && double.TryParse(m.Groups[1].Value,
-                            System.Globalization.NumberStyles.Any,
-                            System.Globalization.CultureInfo.InvariantCulture, out var ra))
-                            waitSec = ra + 0.5;
-
-                        if (attempt < 5)
-                        {
-                            Log($"  Emoji \"{emojiName}\" rate-limited, retrying in {waitSec:0}s… (attempt {attempt}/5)", LogLevel.Warn);
-                            await Task.Delay(TimeSpan.FromSeconds(waitSec), ct);
-                        }
-                        else
-                        {
-                            Log($"  Emoji \"{emojiName}\" failed after 5 attempts: {ex.Message}", LogLevel.Warn);
-                        }
-                    }
+                        name  = emojiName,
+                        image = dataUri,
+                    }, emojiCts.Token);
+                    Log($"  Emoji \"{emojiName}\" cloned", LogLevel.Success);
                 }
-
-                await Task.Delay(600, ct);
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    Log($"  Emoji \"{emojiName}\" timed out, skipping", LogLevel.Warn);
+                }
+                catch (Exception ex) when (ex.Message.Contains("30008") || ex.Message.Contains("Maximum number of emojis"))
+                {
+                    Log($"  Emoji limit reached on destination server, stopping.", LogLevel.Warn);
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Log($"  Emoji \"{emojiName}\" failed: {ex.Message}", LogLevel.Warn);
+                }
             }
 
             Log($"Emoji cloning complete.", LogLevel.Success);
@@ -351,7 +343,6 @@ public sealed class ClonerService
                 var chName = srcCh?["name"]?.GetValue<string>() ?? srcChId;
                 Log($"  #{chName}: fetching messages…");
 
-                // create webhook in destination channel
                 JsonNode webhook;
                 try   { webhook = await _api.CreateWebhookAsync(dstChId, "Cloner", ct); }
                 catch (Exception ex)
