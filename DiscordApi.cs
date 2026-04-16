@@ -11,6 +11,7 @@ public sealed class DiscordApi : IDisposable
     private const string Base = "https://discord.com/api/v10";
 
     private readonly HttpClient _hc;
+    private readonly HttpClient _whc;
     private readonly JsonSerializerOptions _jo = new() { PropertyNameCaseInsensitive = true };
 
     private const string SuperProps =
@@ -31,6 +32,12 @@ public sealed class DiscordApi : IDisposable
         _hc.DefaultRequestHeaders.Add("Origin", "https://discord.com");
         _hc.DefaultRequestHeaders.Add("Referer", "https://discord.com/channels/@me");
         _hc.Timeout = TimeSpan.FromSeconds(30);
+
+        _whc = new HttpClient();
+        _whc.DefaultRequestHeaders.Add("User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+        _whc.Timeout = TimeSpan.FromSeconds(30);
     }
 
     // ── raw request with auto rate-limit retry ────────────────────────────────
@@ -210,16 +217,41 @@ public sealed class DiscordApi : IDisposable
         CancellationToken ct = default)
         => (await PostAsync($"/channels/{channelId}/webhooks", new { name }, ct))!;
 
-    /// <summary>Executes a webhook to post a message.</summary>
     public async Task ExecuteWebhookAsync(string webhookId, string webhookToken,
         object body, CancellationToken ct = default)
-        => await SendAsync(HttpMethod.Post,
-            $"/webhooks/{webhookId}/{webhookToken}?wait=false", body, ct);
+    {
+        var url = $"{Base}/webhooks/{webhookId}/{webhookToken}?wait=false";
+        while (true)
+        {
+            var req = new HttpRequestMessage(HttpMethod.Post, url);
+            req.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
 
-    /// <summary>Deletes a webhook by its ID and token.</summary>
+            var resp = await _whc.SendAsync(req, ct);
+
+            if (resp.StatusCode == HttpStatusCode.TooManyRequests)
+            {
+                double wait = 5;
+                if (resp.Headers.RetryAfter?.Delta is { } d) wait = d.TotalSeconds + 0.5;
+                else
+                {
+                    try { var rl = await resp.Content.ReadAsStringAsync(ct); wait = JsonNode.Parse(rl)?["retry_after"]?.GetValue<double>() ?? 5; } catch { }
+                }
+                await Task.Delay(TimeSpan.FromSeconds(Math.Max(wait, 1)), ct);
+                continue;
+            }
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                var err = await resp.Content.ReadAsStringAsync(ct);
+                throw new Exception($"HTTP {(int)resp.StatusCode} {resp.StatusCode} — /webhooks/{webhookId}/{webhookToken}?wait=false\n{err}");
+            }
+            return;
+        }
+    }
+
     public async Task DeleteWebhookAsync(string webhookId, string webhookToken,
         CancellationToken ct = default)
         => await DeleteAsync($"/webhooks/{webhookId}/{webhookToken}", ct);
 
-    public void Dispose() => _hc.Dispose();
+    public void Dispose() { _hc.Dispose(); _whc.Dispose(); }
 }
